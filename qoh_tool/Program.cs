@@ -145,12 +145,13 @@ namespace qoh_tool
             {
                 byte encryptedByte = reader.ReadByte();
                 
-                // Bit manipulation: ~(8 * i) + (i >> 3)
-                byte posMagic = (byte)(~(i << 3) + (i >> 3));
+                // Bit manipulation: ~(8 * i) + (i >> 3) - keep as int until final calculation
+                int posMagicInt = (~(i << 3) + (i >> 3)) & 0xFF;
                 
-                // Complex XOR chain
-                byte decryptedByte = (byte)((encryptedByte ^ filename[filenameIndex] ^ posMagic) 
-                                          - primaryKey[keyIndex] - 109);
+                // Complex XOR chain - step by step like Python
+                int step1 = encryptedByte ^ filename[filenameIndex] ^ posMagicInt;
+                int step2 = (step1 - primaryKey[keyIndex]) & 0xFF;
+                byte decryptedByte = (byte)((step2 - 109) & 0xFF);
                 
                 fileSize |= (uint)(decryptedByte << (i * 8));
                 
@@ -162,7 +163,7 @@ namespace qoh_tool
             return fileSize;
         }
 
-        // Complex algorithm for section table
+        // Complex algorithm for section table - ORIGINAL WORKING VERSION
         public static CHRSectionInfo DecryptSectionTable(BinaryReader reader, byte[] filename, byte[] primaryKey)
         {
             reader.BaseStream.Position = 0x14; // Section table at 0x14-0x2B (24 bytes)
@@ -178,12 +179,13 @@ namespace qoh_tool
             {
                 byte encryptedByte = reader.ReadByte();
                 
-                // Bit manipulation: ~(8 * i) + (i >> 3)
-                byte posMagic = (byte)(~(i << 3) + (i >> 3));
+                // Bit manipulation: ~(8 * i) + (i >> 3) - keep as int until final calculation
+                int posMagicInt = (~(i << 3) + (i >> 3)) & 0xFF;
                 
-                // Complex XOR chain
-                byte decryptedByte = (byte)((encryptedByte ^ filename[filenameIndex] ^ posMagic) 
-                                          - primaryKey[keyIndex] - 109);
+                // Complex XOR chain - step by step like Python
+                int step1 = encryptedByte ^ filename[filenameIndex] ^ posMagicInt;
+                int step2 = (step1 - primaryKey[keyIndex]) & 0xFF;
+                byte decryptedByte = (byte)((step2 - 109) & 0xFF);
                 
                 // Store in appropriate uint32
                 int sectionIndex = i / 4;
@@ -220,12 +222,13 @@ namespace qoh_tool
             {
                 byte encryptedByte = reader.ReadByte();
                 
-                // Bit manipulation: ~(8 * i) + (i >> 3)
-                byte posMagic = (byte)(~(i << 3) + (i >> 3));
+                // Bit manipulation: ~(8 * i) + (i >> 3) - keep as int until final calculation
+                int posMagicInt = (~((int)i << 3) + ((int)i >> 3)) & 0xFF;
                 
-                // Complex XOR chain
-                byte decryptedByte = (byte)((encryptedByte ^ filename[filenameIndex] ^ posMagic) 
-                                          - primaryKey[keyIndex] - 109);
+                // Complex XOR chain - step by step like Python
+                int step1 = encryptedByte ^ filename[filenameIndex] ^ posMagicInt;
+                int step2 = (step1 - primaryKey[keyIndex]) & 0xFF;
+                byte decryptedByte = (byte)((step2 - 109) & 0xFF);
                 
                 writer.Write(decryptedByte);
                 
@@ -238,6 +241,105 @@ namespace qoh_tool
 
     internal class Program
     {
+        static void AnalyzeFolder(string inputFolder, string outputFolder)
+        {
+            ColorConsole.WriteSection("BATCH CHR ANALYSIS MODE");
+            ColorConsole.WriteInfo($"Input folder: {Colors.CrystalWhite}{inputFolder}{Colors.Reset}");
+            ColorConsole.WriteInfo($"Output folder: {Colors.CrystalWhite}{outputFolder}{Colors.Reset}");
+            Console.WriteLine();
+
+            var chrFiles = Directory.GetFiles(inputFolder, "*.chr", SearchOption.AllDirectories);
+            ColorConsole.WriteInfo($"Found {Colors.GoldYellow}{chrFiles.Length}{Colors.Reset} CHR files to analyze");
+            Console.WriteLine();
+
+            var workingFiles = new List<string>();
+            var failingFiles = new List<string>();
+            byte[] primaryKey = CHRDecryptor.GetPrimaryKey();
+
+            foreach (var chrFile in chrFiles)
+            {
+                try
+                {
+                    using (BinaryReader reader = new BinaryReader(File.OpenRead(chrFile)))
+                    {
+                        // Test header decryption
+                        reader.BaseStream.Position = 0;
+                        int keyIndex = 0;
+                        byte[] headerBytes = new byte[16];
+                        
+                        for (int i = 0; i < 0x10; i++)
+                        {
+                            if (keyIndex >= primaryKey.Length) keyIndex = 0;
+                            byte encryptedByte = reader.ReadByte();
+                            byte decryptedByte = (byte)(encryptedByte ^ primaryKey[keyIndex]);
+                            headerBytes[i] = decryptedByte;
+                            keyIndex++;
+                        }
+                        
+                        string filename = Encoding.UTF8.GetString(headerBytes).TrimEnd('\0');
+                        byte[] filenameBytes = Encoding.UTF8.GetBytes(filename);
+                        
+                        // Test section table decryption
+                        CHRDecryptor.CHRSectionInfo sections = CHRDecryptor.DecryptSectionTable(reader, filenameBytes, primaryKey);
+                        
+                        // Check if section counts are reasonable (not garbage)
+                        bool isWorking = sections.AnimationFrameCount < 100000 && sections.CollisionData2Count < 100000;
+                        
+                        if (isWorking)
+                        {
+                            workingFiles.Add(chrFile);
+                            ColorConsole.WriteSuccess($"{Path.GetFileName(chrFile)} - {Colors.NeonPurple}{filename}{Colors.Reset} - Frames: {Colors.MatrixGreen}{sections.AnimationFrameCount}{Colors.Reset}");
+                        }
+                        else
+                        {
+                            failingFiles.Add(chrFile);
+                            ColorConsole.WriteError($"{Path.GetFileName(chrFile)} - {Colors.NeonPurple}{filename}{Colors.Reset} - Frames: {Colors.LaserRed}{sections.AnimationFrameCount:N0}{Colors.Reset} (FAILED)");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    failingFiles.Add(chrFile);
+                    ColorConsole.WriteError($"{Path.GetFileName(chrFile)} - Exception: {ex.Message}");
+                }
+            }
+
+            // Summary report
+            Console.WriteLine();
+            ColorConsole.WriteSection("ANALYSIS SUMMARY");
+            ColorConsole.WriteSuccess($"Working files: {Colors.CyberGreen}{workingFiles.Count}{Colors.Reset}/{chrFiles.Length}");
+            ColorConsole.WriteError($"Failing files: {Colors.LaserRed}{failingFiles.Count}{Colors.Reset}/{chrFiles.Length}");
+            
+            // Write detailed report to file
+            string reportPath = Path.Combine(outputFolder, "chr_analysis_report.txt");
+            Directory.CreateDirectory(outputFolder);
+            
+            using (var writer = new StreamWriter(reportPath))
+            {
+                writer.WriteLine("QOH CHR DECRYPTOR - BATCH ANALYSIS REPORT");
+                writer.WriteLine($"Generated: {DateTime.Now}");
+                writer.WriteLine($"Total files analyzed: {chrFiles.Length}");
+                writer.WriteLine($"Working files: {workingFiles.Count}");
+                writer.WriteLine($"Failing files: {failingFiles.Count}");
+                writer.WriteLine();
+                
+                writer.WriteLine("WORKING FILES:");
+                foreach (var file in workingFiles)
+                {
+                    writer.WriteLine($"  ✓ {file}");
+                }
+                
+                writer.WriteLine();
+                writer.WriteLine("FAILING FILES:");
+                foreach (var file in failingFiles)
+                {
+                    writer.WriteLine($"  ✗ {file}");
+                }
+            }
+            
+            ColorConsole.WriteSuccess($"Detailed report saved to: {Colors.CyberGreen}{reportPath}{Colors.Reset}");
+        }
+
         static void Main(string[] args)
         {
             ColorConsole.WriteHeader("");
@@ -245,8 +347,17 @@ namespace qoh_tool
             
             if (args.Length == 0)
             {
-                ColorConsole.WriteError("No input file specified!");
-                Console.WriteLine($"{Colors.BrightYellow}Usage: {Colors.BrightWhite}qoh_tool.exe <chr_file>{Colors.Reset}");
+                ColorConsole.WriteError("No input specified!");
+                Console.WriteLine($"{Colors.BrightYellow}Usage:{Colors.Reset}");
+                Console.WriteLine($"  {Colors.BrightWhite}Single file: {Colors.GoldYellow}qoh_tool.exe <chr_file>{Colors.Reset}");
+                Console.WriteLine($"  {Colors.BrightWhite}Batch mode:  {Colors.GoldYellow}qoh_tool.exe <input_folder> <output_folder>{Colors.Reset}");
+                return;
+            }
+            
+            // Check if batch mode (2 arguments = input folder + output folder)
+            if (args.Length == 2)
+            {
+                AnalyzeFolder(args[0], args[1]);
                 return;
             }
 
@@ -283,14 +394,14 @@ namespace qoh_tool
                     
                     byte[] filenameBytes = Encoding.UTF8.GetBytes(filename);
                     
-                    // Step 2: Get actual file size and decrypt the size field
+                    // Step 2: Go back to the working approach
                     long actualFileSize = reader.BaseStream.Length;
                     uint decryptedSizeField = CHRDecryptor.DecryptFileSize(reader, filenameBytes, primaryKey);
                     ColorConsole.WriteSuccess($"Actual file size: {Colors.GoldYellow}{actualFileSize:N0} bytes{Colors.Reset}");
                     ColorConsole.WriteInfo($"Decrypted size field: {Colors.GoldYellow}{decryptedSizeField} {Colors.Reset}(possibly filename length or header info)");
                     Console.WriteLine();
                     
-                    // Step 3: Decrypt section table using our complex algorithm  
+                    // Step 3: Use our working section table approach
                     CHRDecryptor.CHRSectionInfo sections = CHRDecryptor.DecryptSectionTable(reader, filenameBytes, primaryKey);
                     
                     ColorConsole.WriteSection("CHR SECTION ANALYSIS");
@@ -300,6 +411,20 @@ namespace qoh_tool
                     ColorConsole.WriteData("Sprites", sections.SpriteDataCount);
                     ColorConsole.WriteData("Animation Frames", sections.AnimationFrameCount);
                     ColorConsole.WriteData("Collision Data2", sections.CollisionData2Count);
+                    
+                    // Debug output for failed files (detect garbage section counts)
+                    bool isFailedFile = sections.AnimationFrameCount > 100000 || sections.CollisionData2Count > 100000;
+                    if (isFailedFile)
+                    {
+                        Console.WriteLine();
+                        ColorConsole.WriteWarning("FAILED FILE DETECTED - Adding debug info:");
+                        Console.WriteLine($"{Colors.BrightRed}Animation Frames: {sections.AnimationFrameCount:N0} (too large - indicates decryption failure){Colors.Reset}");
+                        Console.WriteLine($"{Colors.BrightRed}Collision Data2: {sections.CollisionData2Count:N0} (too large - indicates decryption failure){Colors.Reset}");
+                        Console.WriteLine();
+                        ColorConsole.WriteInfo("This file likely uses a different encryption scheme or key");
+                        ColorConsole.WriteInfo("Working files: rina_cra, obj1, rina, c_serika, h_hatune");
+                        ColorConsole.WriteInfo("Failing files: chizuru, ayaka, akari, azusa, etc.");
+                    }
                     
                     // Step 4: Decrypt each section using our complex algorithm with proper boundaries
                     long currentOffset = 0x2C; // First section starts at 0x2C
