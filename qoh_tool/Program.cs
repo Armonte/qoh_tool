@@ -65,12 +65,18 @@ namespace qoh_tool
 
         public static void WriteHeader(string text)
         {
-            Console.WriteLine($"{Colors.Bold}{Colors.ElectricBlue}================================================================{Colors.Reset}");
-            Console.WriteLine($"{Colors.Bold}{Colors.ElectricBlue}|{Colors.CrystalWhite}              QOH CHR DECRYPTOR v2.0                       {Colors.ElectricBlue}|{Colors.Reset}");
-            Console.WriteLine($"{Colors.Bold}{Colors.ElectricBlue}|{Colors.CrystalWhite}   Queen of Heart '99 - Watanabe Production/French Bread   {Colors.ElectricBlue}|{Colors.Reset}");
-            Console.WriteLine($"{Colors.Bold}{Colors.ElectricBlue}|{Colors.CrystalWhite}                                                        {Colors.ElectricBlue}|{Colors.Reset}");
-            Console.WriteLine($"{Colors.Bold}{Colors.ElectricBlue}|{Colors.GoldYellow}          Credits: u4ick & COPKILLER4FUN                  {Colors.ElectricBlue}|{Colors.Reset}");
-            Console.WriteLine($"{Colors.Bold}{Colors.ElectricBlue}================================================================{Colors.Reset}");
+            string border = "================================================================";
+            string line1 = "              QOH CHR DECRYPTOR v2.0                           ";
+            string line2 = "   Queen of Heart '99 - Watanabe Production/French Bread       ";
+            string line3 = "                                                               ";
+            string line4 = "          Credits: u4ick & COPKILLER4FUN                       ";
+            
+            Console.WriteLine($"{Colors.Bold}{Colors.ElectricBlue}{border}{Colors.Reset}");
+            Console.WriteLine($"{Colors.Bold}{Colors.ElectricBlue}|{Colors.CrystalWhite}{line1}{Colors.ElectricBlue}|{Colors.Reset}");
+            Console.WriteLine($"{Colors.Bold}{Colors.ElectricBlue}|{Colors.CrystalWhite}{line2}{Colors.ElectricBlue}|{Colors.Reset}");
+            Console.WriteLine($"{Colors.Bold}{Colors.ElectricBlue}|{Colors.CrystalWhite}{line3}{Colors.ElectricBlue}|{Colors.Reset}");
+            Console.WriteLine($"{Colors.Bold}{Colors.ElectricBlue}|{Colors.GoldYellow}{line4}{Colors.ElectricBlue}|{Colors.Reset}");
+            Console.WriteLine($"{Colors.Bold}{Colors.ElectricBlue}{border}{Colors.Reset}");
         }
         
         public static void WriteSuccess(string text)
@@ -277,9 +283,11 @@ namespace qoh_tool
                     
                     byte[] filenameBytes = Encoding.UTF8.GetBytes(filename);
                     
-                    // Step 2: Decrypt file size using our complex algorithm
-                    uint fileSize = CHRDecryptor.DecryptFileSize(reader, filenameBytes, primaryKey);
-                    ColorConsole.WriteSuccess($"Decrypted file size: {Colors.GoldYellow}{fileSize:N0} bytes{Colors.Reset}");
+                    // Step 2: Get actual file size and decrypt the size field
+                    long actualFileSize = reader.BaseStream.Length;
+                    uint decryptedSizeField = CHRDecryptor.DecryptFileSize(reader, filenameBytes, primaryKey);
+                    ColorConsole.WriteSuccess($"Actual file size: {Colors.GoldYellow}{actualFileSize:N0} bytes{Colors.Reset}");
+                    ColorConsole.WriteInfo($"Decrypted size field: {Colors.GoldYellow}{decryptedSizeField} {Colors.Reset}(possibly filename length or header info)");
                     Console.WriteLine();
                     
                     // Step 3: Decrypt section table using our complex algorithm  
