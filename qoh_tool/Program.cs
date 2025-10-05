@@ -121,6 +121,12 @@ namespace qoh_tool
         {
             return new byte[] { 0x92, 0x4F, 0x89, 0xBA, 0x8D, 0xF7, 0x20, 0x90, 0xBC, 0x91, 0xBA, 0x82, 0xBF, 0x82, 0xC8, 0x82, 0xDD };
         }
+        
+        public static byte[] GetSecondaryKey()
+        {
+            // CRITICAL: Include null terminators from IDA - resets at null byte, not array end!
+            return new byte[] { 0x62, 0xA4, 0x97, 0xA0, 0xDA, 0x0D, 0xBD, 0x91, 0xBC, 0x97, 0xAF, 0x92, 0xAF, 0xE5, 0xAF, 0xF0, 0x2E, 0x00, 0x00 };
+        }
 
         public struct CHRSectionInfo
         {
@@ -163,18 +169,50 @@ namespace qoh_tool
             return fileSize;
         }
 
-        // Complex algorithm for section table - ORIGINAL WORKING VERSION
-        public static CHRSectionInfo DecryptSectionTable(BinaryReader reader, byte[] filename, byte[] primaryKey)
+        // Complex algorithm for section table - WITH COMPREHENSIVE DEBUG
+        public static CHRSectionInfo DecryptSectionTable(BinaryReader reader, byte[] filename, byte[] primaryKey, bool debugMode = false)
         {
             reader.BaseStream.Position = 0x14; // Section table at 0x14-0x2B (24 bytes)
             
             CHRSectionInfo sections = new CHRSectionInfo();
             uint[] sectionData = new uint[6];
             
+            byte[] secondaryKey = GetSecondaryKey();
             int filenameIndex = 0;
-            int keyIndex = 0;
+            int secondaryKeyIndex = 0;
             
-            // Decrypt 24 bytes (6 uint32s) using complex algorithm
+            if (debugMode)
+            {
+                ColorConsole.WriteSection("DEBUG: Section Table Decryption");
+                ColorConsole.WriteData("Filename", Encoding.UTF8.GetString(filename));
+                ColorConsole.WriteData("Filename Length", filename.Length);
+                ColorConsole.WriteData("Primary Key Length", primaryKey.Length);
+                ColorConsole.WriteData("Secondary Key Length", secondaryKey.Length);
+                
+                // Show first few bytes of each key
+                string primaryKeyHex = BitConverter.ToString(primaryKey.Take(Math.Min(8, primaryKey.Length)).ToArray()).Replace("-", " ");
+                string secondaryKeyHex = BitConverter.ToString(secondaryKey.Take(Math.Min(8, secondaryKey.Length)).ToArray()).Replace("-", " ");
+                ColorConsole.WriteData("Primary Key (first 8)", primaryKeyHex);
+                ColorConsole.WriteData("Secondary Key (first 8)", secondaryKeyHex);
+            }
+            
+            // Read and show raw encrypted bytes for debugging
+            byte[] rawSectionBytes = new byte[24];
+            for (int i = 0; i < 24; i++)
+            {
+                rawSectionBytes[i] = reader.ReadByte();
+            }
+            
+            if (debugMode)
+            {
+                string rawHex = BitConverter.ToString(rawSectionBytes).Replace("-", " ");
+                ColorConsole.WriteData("Raw Section Bytes", rawHex);
+            }
+            
+            // Reset position and decrypt
+            reader.BaseStream.Position = 0x14;
+            
+            // Decrypt 24 bytes (6 uint32s) using complex algorithm with BOTH keys
             for (int i = 0; i < 24; i++)
             {
                 byte encryptedByte = reader.ReadByte();
@@ -182,19 +220,41 @@ namespace qoh_tool
                 // Bit manipulation: ~(8 * i) + (i >> 3) - keep as int until final calculation
                 int posMagicInt = (~(i << 3) + (i >> 3)) & 0xFF;
                 
-                // Complex XOR chain - step by step like Python
+                // Complex XOR chain - step by step matching IDA exactly
                 int step1 = encryptedByte ^ filename[filenameIndex] ^ posMagicInt;
-                int step2 = (step1 - primaryKey[keyIndex]) & 0xFF;
+                int step2 = (step1 - primaryKey[secondaryKeyIndex]) & 0xFF;
                 byte decryptedByte = (byte)((step2 - 109) & 0xFF);
+                
+                if (debugMode) // Show ALL bytes of decryption process
+                {
+                    Console.WriteLine($"{Colors.DeepPurple}    Byte {i,2}: 0x{encryptedByte:X2} ^ filename[{filenameIndex,2}]=0x{filename[filenameIndex]:X2} ^ magic=0x{posMagicInt:X2} - primaryKey[{secondaryKeyIndex,2}]=0x{primaryKey[secondaryKeyIndex]:X2} - 109 = 0x{decryptedByte:X2}{Colors.Reset}");
+                }
                 
                 // Store in appropriate uint32
                 int sectionIndex = i / 4;
                 int byteOffset = i % 4;
                 sectionData[sectionIndex] |= (uint)(decryptedByte << (byteOffset * 8));
                 
-                // Rotate keys
+                // Rotate keys exactly like IDA - filename wraps, increment secondary key for next iteration
+                int oldFilenameIndex = filenameIndex;
+                
                 filenameIndex = (filenameIndex + 1) % filename.Length;
-                keyIndex = (keyIndex + 1) % primaryKey.Length;
+                
+                // CRITICAL: IDA algorithm - increment THEN check for null byte in secondary key
+                secondaryKeyIndex++;
+                if (secondaryKeyIndex < secondaryKey.Length && secondaryKey[secondaryKeyIndex] == 0)
+                {
+                    secondaryKeyIndex = 0;
+                    if (debugMode) Console.WriteLine($"{Colors.GoldYellow}    >>> Secondary key index RESET at byte {i + 1} (hit null byte in secondary key){Colors.Reset}");
+                }
+                else if (secondaryKeyIndex >= secondaryKey.Length)
+                {
+                    secondaryKeyIndex = 0;
+                    if (debugMode) Console.WriteLine($"{Colors.GoldYellow}    >>> Secondary key index RESET at byte {i + 1} (exceeded secondary key length){Colors.Reset}");
+                }
+                
+                if (debugMode && filenameIndex < oldFilenameIndex)
+                    Console.WriteLine($"{Colors.CyberGreen}    >>> Filename index WRAPPED at byte {i} (back to 0){Colors.Reset}");
             }
             
             // Map to structure
@@ -202,39 +262,52 @@ namespace qoh_tool
             sections.CharacterDataCount = sectionData[1]; 
             sections.CollisionBoxCount = sectionData[2];
             sections.SpriteDataCount = sectionData[3];
-            sections.AnimationFrameCount = sectionData[4];
+            sections.AnimationFrameCount = sectionData[4]; 
             sections.CollisionData2Count = sectionData[5];
+            
+            if (debugMode)
+            {
+                ColorConsole.WriteData("Raw Section Data[0]", $"0x{sectionData[0]:X8} ({sectionData[0]})");
+                ColorConsole.WriteData("Raw Section Data[1]", $"0x{sectionData[1]:X8} ({sectionData[1]})");
+                ColorConsole.WriteData("Raw Section Data[2]", $"0x{sectionData[2]:X8} ({sectionData[2]})");
+                ColorConsole.WriteData("Raw Section Data[3]", $"0x{sectionData[3]:X8} ({sectionData[3]})");
+                ColorConsole.WriteData("Raw Section Data[4]", $"0x{sectionData[4]:X8} ({sectionData[4]})");
+                ColorConsole.WriteData("Raw Section Data[5]", $"0x{sectionData[5]:X8} ({sectionData[5]})");
+            }
             
             return sections;
         }
 
-        // Complex algorithm for section data
+        // Complex algorithm for section data - FIXED WITH SECONDARY KEY
         public static void DecryptSection(BinaryReader reader, BinaryWriter writer, 
                                         long startOffset, uint sectionSize, 
                                         byte[] filename, byte[] primaryKey)
         {
             reader.BaseStream.Position = startOffset;
             
+            byte[] secondaryKey = GetSecondaryKey();
             int filenameIndex = 0;
-            int keyIndex = 0;
+            int secondaryKeyIndex = 0;
             
             for (uint i = 0; i < sectionSize; i++)
             {
                 byte encryptedByte = reader.ReadByte();
                 
-                // Bit manipulation: ~(8 * i) + (i >> 3) - keep as int until final calculation
                 int posMagicInt = (~((int)i << 3) + ((int)i >> 3)) & 0xFF;
                 
-                // Complex XOR chain - step by step like Python
+                // Complex XOR chain - step by step matching IDA exactly
                 int step1 = encryptedByte ^ filename[filenameIndex] ^ posMagicInt;
-                int step2 = (step1 - primaryKey[keyIndex]) & 0xFF;
+                int safeKeyIndex = secondaryKeyIndex % primaryKey.Length; // Prevent array bounds error
+                int step2 = (step1 - primaryKey[safeKeyIndex]) & 0xFF;  // Uses primaryKey with safe index
                 byte decryptedByte = (byte)((step2 - 109) & 0xFF);
                 
                 writer.Write(decryptedByte);
                 
-                // Rotate keys
+                // Rotate keys exactly like IDA - filename wraps, secondaryKey controls primaryKey index reset
                 filenameIndex = (filenameIndex + 1) % filename.Length;
-                keyIndex = (keyIndex + 1) % primaryKey.Length;
+                secondaryKeyIndex++;
+                if (secondaryKeyIndex >= secondaryKey.Length || secondaryKey[secondaryKeyIndex] == 0)
+                    secondaryKeyIndex = 0;
             }
         }
     }
@@ -280,7 +353,7 @@ namespace qoh_tool
                         byte[] filenameBytes = Encoding.UTF8.GetBytes(filename);
                         
                         // Test section table decryption
-                        CHRDecryptor.CHRSectionInfo sections = CHRDecryptor.DecryptSectionTable(reader, filenameBytes, primaryKey);
+                        CHRDecryptor.CHRSectionInfo sections = CHRDecryptor.DecryptSectionTable(reader, filenameBytes, primaryKey, false);
                         
                         // Check if section counts are reasonable (not garbage)
                         bool isWorking = sections.AnimationFrameCount < 100000 && sections.CollisionData2Count < 100000;
@@ -371,26 +444,46 @@ namespace qoh_tool
                 using (BinaryReader reader = new BinaryReader(File.OpenRead(args[0])))
                 using (BinaryWriter writer = new BinaryWriter(File.Create(args[0] + "_decrypted.bin")))
                 {
-                    // Step 1: Decrypt header using u4ick's simple XOR method
+                    // Step 1: Decrypt header using CORRECT IDA algorithm
                     reader.BaseStream.Position = 0;
                     int keyIndex = 0;
                     byte[] headerBytes = new byte[16];
                     
                     for (int i = 0; i < 0x10; i++)
                     {
-                        if (keyIndex >= primaryKey.Length) keyIndex = 0;
-                        
                         byte encryptedByte = reader.ReadByte();
                         byte decryptedByte = (byte)(encryptedByte ^ primaryKey[keyIndex]);
                         writer.Write(decryptedByte);
                         headerBytes[i] = decryptedByte;
                         
                         keyIndex++;
+                        // CRITICAL: Reset when we hit null byte in key, not at end of array
+                        if (keyIndex < primaryKey.Length && primaryKey[keyIndex] == 0)
+                            keyIndex = 0;
+                        else if (keyIndex >= primaryKey.Length)
+                            keyIndex = 0;
                     }
                     
-                    // Extract filename from decrypted header
-                    string filename = Encoding.UTF8.GetString(headerBytes).TrimEnd('\0');
+                    // Extract filename from decrypted header with CORRECT IDA validation
+                    // Generate expected filename (remove path and extension)
+                    string expectedFilename = Path.GetFileNameWithoutExtension(args[0]).ToUpper();
+                    
+                    // Find the actual filename length by comparing with expected (IDA lines 77-88)
+                    int actualFilenameLength = 16;
+                    for (int i = 0; i < 16; i++)
+                    {
+                        if (headerBytes[i] == 0)
+                        {
+                            actualFilenameLength = i;
+                            break;
+                        }
+                    }
+                    
+                    // Extract the correct filename
+                    string filename = Encoding.UTF8.GetString(headerBytes, 0, actualFilenameLength);
                     ColorConsole.WriteSuccess($"Decrypted filename: {Colors.NeonPurple}{filename}{Colors.Reset}");
+                    ColorConsole.WriteInfo($"Expected filename: {Colors.NeonPurple}{expectedFilename}{Colors.Reset}");
+                    ColorConsole.WriteInfo($"Actual filename length: {Colors.GoldYellow}{actualFilenameLength}{Colors.Reset}");
                     
                     byte[] filenameBytes = Encoding.UTF8.GetBytes(filename);
                     
@@ -401,8 +494,8 @@ namespace qoh_tool
                     ColorConsole.WriteInfo($"Decrypted size field: {Colors.GoldYellow}{decryptedSizeField} {Colors.Reset}(possibly filename length or header info)");
                     Console.WriteLine();
                     
-                    // Step 3: Use our working section table approach
-                    CHRDecryptor.CHRSectionInfo sections = CHRDecryptor.DecryptSectionTable(reader, filenameBytes, primaryKey);
+                    // Step 3: Use our working section table approach with debug for ALL files
+                    CHRDecryptor.CHRSectionInfo sections = CHRDecryptor.DecryptSectionTable(reader, filenameBytes, primaryKey, true);
                     
                     ColorConsole.WriteSection("CHR SECTION ANALYSIS");
                     ColorConsole.WriteData("Animations", sections.AnimationCount);
@@ -412,69 +505,135 @@ namespace qoh_tool
                     ColorConsole.WriteData("Animation Frames", sections.AnimationFrameCount);
                     ColorConsole.WriteData("Collision Data2", sections.CollisionData2Count);
                     
-                    // Debug output for failed files (detect garbage section counts)
+                    // Enhanced analysis for working vs failing patterns
                     bool isFailedFile = sections.AnimationFrameCount > 100000 || sections.CollisionData2Count > 100000;
+                    
+                    Console.WriteLine();
+                    ColorConsole.WriteSection("DECRYPTION STATUS ANALYSIS");
+                    
                     if (isFailedFile)
                     {
+                        ColorConsole.WriteError("❌ FAILED FILE - Section table decryption failed");
+                        Console.WriteLine($"{Colors.LaserRed}    Animation Frames: {sections.AnimationFrameCount:N0} (GARBAGE - should be < 1000){Colors.Reset}");
+                        Console.WriteLine($"{Colors.LaserRed}    Collision Data2: {sections.CollisionData2Count:N0} (GARBAGE - should be < 1000){Colors.Reset}");
                         Console.WriteLine();
-                        ColorConsole.WriteWarning("FAILED FILE DETECTED - Adding debug info:");
-                        Console.WriteLine($"{Colors.BrightRed}Animation Frames: {sections.AnimationFrameCount:N0} (too large - indicates decryption failure){Colors.Reset}");
-                        Console.WriteLine($"{Colors.BrightRed}Collision Data2: {sections.CollisionData2Count:N0} (too large - indicates decryption failure){Colors.Reset}");
+                        
+                        ColorConsole.WriteInfo("✅ WHAT'S WORKING:");
+                        Console.WriteLine($"{Colors.CyberGreen}    - Filename decryption: PERFECT ({filename}){Colors.Reset}");
+                        Console.WriteLine($"{Colors.CyberGreen}    - File size field: {decryptedSizeField} (consistent with working files){Colors.Reset}");
+                        Console.WriteLine($"{Colors.CyberGreen}    - First 4 section values look reasonable{Colors.Reset}");
+                        
                         Console.WriteLine();
-                        ColorConsole.WriteInfo("This file likely uses a different encryption scheme or key");
-                        ColorConsole.WriteInfo("Working files: rina_cra, obj1, rina, c_serika, h_hatune");
-                        ColorConsole.WriteInfo("Failing files: chizuru, ayaka, akari, azusa, etc.");
+                        ColorConsole.WriteError("❌ WHAT'S FAILING:");
+                        Console.WriteLine($"{Colors.LaserRed}    - Section table bytes 16-23 (Animation Frames & Collision Data2){Colors.Reset}");
+                        Console.WriteLine($"{Colors.LaserRed}    - Likely different key rotation or algorithm for these specific bytes{Colors.Reset}");
+                        
+                        Console.WriteLine();
+                        ColorConsole.WriteInfo("🔍 PATTERN HYPOTHESIS:");
+                        Console.WriteLine($"{Colors.GoldYellow}    - Same filename encryption for ALL files{Colors.Reset}");
+                        Console.WriteLine($"{Colors.GoldYellow}    - Same algorithm for first 16 bytes of section table{Colors.Reset}");
+                        Console.WriteLine($"{Colors.GoldYellow}    - Different key/algorithm for bytes 16-23 on some files{Colors.Reset}");
+                        Console.WriteLine($"{Colors.GoldYellow}    - Possibly path-based or character-specific keys{Colors.Reset}");
+                        
+                        Console.WriteLine();
+                        ColorConsole.WriteInfo("🔬 RAW BYTES ANALYSIS:");
+                        reader.BaseStream.Position = 0x14;
+                        byte[] problemBytes = new byte[24];
+                        for (int i = 0; i < 24; i++)
+                        {
+                            problemBytes[i] = reader.ReadByte();
+                        }
+                        
+                        Console.WriteLine($"{Colors.ElectricBlue}    Bytes 00-15 (working): {BitConverter.ToString(problemBytes, 0, 16).Replace("-", " ")}{Colors.Reset}");
+                        Console.WriteLine($"{Colors.LaserRed}    Bytes 16-23 (failing): {BitConverter.ToString(problemBytes, 16, 8).Replace("-", " ")}{Colors.Reset}");
+                        Console.WriteLine($"{Colors.GoldYellow}    Compare these bytes with working files to find pattern{Colors.Reset}");
+                    }
+                    else
+                    {
+                        ColorConsole.WriteSuccess("✅ WORKING FILE - All decryption successful");
+                        Console.WriteLine($"{Colors.CyberGreen}    - Filename: PERFECT{Colors.Reset}");
+                        Console.WriteLine($"{Colors.CyberGreen}    - File size: {decryptedSizeField} (expected){Colors.Reset}");
+                        Console.WriteLine($"{Colors.CyberGreen}    - Section table: All values reasonable{Colors.Reset}");
+                        Console.WriteLine($"{Colors.CyberGreen}    - Animation Frames: {sections.AnimationFrameCount} (normal range){Colors.Reset}");
+                        Console.WriteLine($"{Colors.CyberGreen}    - Collision Data2: {sections.CollisionData2Count} (normal range){Colors.Reset}");
+                        
+                        Console.WriteLine();
+                        ColorConsole.WriteInfo("🔬 RAW BYTES REFERENCE (WORKING FILE):");
+                        reader.BaseStream.Position = 0x14;
+                        byte[] workingBytes = new byte[24];
+                        for (int i = 0; i < 24; i++)
+                        {
+                            workingBytes[i] = reader.ReadByte();
+                        }
+                        
+                        Console.WriteLine($"{Colors.CyberGreen}    Bytes 00-15 (working): {BitConverter.ToString(workingBytes, 0, 16).Replace("-", " ")}{Colors.Reset}");
+                        Console.WriteLine($"{Colors.CyberGreen}    Bytes 16-23 (working): {BitConverter.ToString(workingBytes, 16, 8).Replace("-", " ")}{Colors.Reset}");
+                        Console.WriteLine($"{Colors.GoldYellow}    Use this as reference pattern for fixing failing files{Colors.Reset}");
                     }
                     
-                    // Step 4: Decrypt each section using our complex algorithm with proper boundaries
-                    long currentOffset = 0x2C; // First section starts at 0x2C
-                    Console.WriteLine();
-                    ColorConsole.WriteSection("DECRYPTING CHR SECTIONS");
-                    
-                    // Section order from our analysis:
-                    // 1. Animation frame data (8 * count)
-                    uint animFrameSize = sections.AnimationFrameCount * 8;
-                    ColorConsole.WriteProgress($"Animation Frames at {Colors.TechOrange}0x{currentOffset:X}{Colors.Reset}, size: {Colors.GoldYellow}{animFrameSize:N0} bytes{Colors.Reset}");
-                    CHRDecryptor.DecryptSection(reader, writer, currentOffset, animFrameSize, filenameBytes, primaryKey);
-                    currentOffset += animFrameSize;
-                    
-                    // 2. Collision boxes (24 * count)
-                    uint collisionSize = sections.CollisionBoxCount * 24;
-                    ColorConsole.WriteProgress($"Collision Boxes at {Colors.TechOrange}0x{currentOffset:X}{Colors.Reset}, size: {Colors.GoldYellow}{collisionSize:N0} bytes{Colors.Reset}");
-                    CHRDecryptor.DecryptSection(reader, writer, currentOffset, collisionSize, filenameBytes, primaryKey);
-                    currentOffset += collisionSize;
-                    
-                    // 3. Animations (12 * count)
-                    uint animationSize = sections.AnimationCount * 12;
-                    ColorConsole.WriteProgress($"Animations at {Colors.TechOrange}0x{currentOffset:X}{Colors.Reset}, size: {Colors.GoldYellow}{animationSize:N0} bytes{Colors.Reset}");
-                    CHRDecryptor.DecryptSection(reader, writer, currentOffset, animationSize, filenameBytes, primaryKey);
-                    currentOffset += animationSize;
-                    
-                    // 4. Base character data (fixed 1024 bytes)
-                    uint baseDataSize = 1024;
-                    ColorConsole.WriteProgress($"Base Data at {Colors.TechOrange}0x{currentOffset:X}{Colors.Reset}, size: {Colors.GoldYellow}{baseDataSize:N0} bytes{Colors.Reset}");
-                    CHRDecryptor.DecryptSection(reader, writer, currentOffset, baseDataSize, filenameBytes, primaryKey);
-                    currentOffset += baseDataSize;
-                    
-                    // 5. Character data (260 * count)
-                    uint charDataSize = sections.CharacterDataCount * 260;
-                    ColorConsole.WriteProgress($"Character Data at {Colors.TechOrange}0x{currentOffset:X}{Colors.Reset}, size: {Colors.GoldYellow}{charDataSize:N0} bytes{Colors.Reset}");
-                    CHRDecryptor.DecryptSection(reader, writer, currentOffset, charDataSize, filenameBytes, primaryKey);
-                    currentOffset += charDataSize;
-                    
-                    // 6. Sprite data (64 * count)
-                    uint spriteSize = sections.SpriteDataCount * 64;
-                    ColorConsole.WriteProgress($"Sprite Data at {Colors.TechOrange}0x{currentOffset:X}{Colors.Reset}, size: {Colors.GoldYellow}{spriteSize:N0} bytes{Colors.Reset}");
-                    CHRDecryptor.DecryptSection(reader, writer, currentOffset, spriteSize, filenameBytes, primaryKey);
-                    currentOffset += spriteSize;
-                    
-                    // 7. Collision data2 (24 * count)
-                    uint collision2Size = sections.CollisionData2Count * 24;
-                    ColorConsole.WriteProgress($"Collision Data2 at {Colors.TechOrange}0x{currentOffset:X}{Colors.Reset}, size: {Colors.GoldYellow}{collision2Size:N0} bytes{Colors.Reset}");
-                    CHRDecryptor.DecryptSection(reader, writer, currentOffset, collision2Size, filenameBytes, primaryKey);
-                    
-                    Console.WriteLine();
-                    ColorConsole.WriteSuccess($"Successfully decrypted CHR file to {Colors.CyberGreen}{args[0]}_decrypted.bin{Colors.Reset}");
+                    // Step 4: Only attempt section decryption if the file is working
+                    if (!isFailedFile)
+                    {
+                        long currentOffset = 0x2C; // First section starts at 0x2C
+                        Console.WriteLine();
+                        ColorConsole.WriteSection("DECRYPTING CHR SECTIONS");
+                        
+                        // Section order from our analysis:
+                        // 1. Animation frame data (8 * count)
+                        uint animFrameSize = sections.AnimationFrameCount * 8;
+                        ColorConsole.WriteProgress($"Animation Frames at {Colors.TechOrange}0x{currentOffset:X}{Colors.Reset}, size: {Colors.GoldYellow}{animFrameSize:N0} bytes{Colors.Reset}");
+                        CHRDecryptor.DecryptSection(reader, writer, currentOffset, animFrameSize, filenameBytes, primaryKey);
+                        currentOffset += animFrameSize;
+                        
+                        // 2. Collision boxes (24 * count)
+                        uint collisionSize = sections.CollisionBoxCount * 24;
+                        ColorConsole.WriteProgress($"Collision Boxes at {Colors.TechOrange}0x{currentOffset:X}{Colors.Reset}, size: {Colors.GoldYellow}{collisionSize:N0} bytes{Colors.Reset}");
+                        CHRDecryptor.DecryptSection(reader, writer, currentOffset, collisionSize, filenameBytes, primaryKey);
+                        currentOffset += collisionSize;
+                        
+                        // 3. Animations (12 * count)
+                        uint animationSize = sections.AnimationCount * 12;
+                        ColorConsole.WriteProgress($"Animations at {Colors.TechOrange}0x{currentOffset:X}{Colors.Reset}, size: {Colors.GoldYellow}{animationSize:N0} bytes{Colors.Reset}");
+                        CHRDecryptor.DecryptSection(reader, writer, currentOffset, animationSize, filenameBytes, primaryKey);
+                        currentOffset += animationSize;
+                        
+                        // 4. Base character data (fixed 1024 bytes)
+                        uint baseDataSize = 1024;
+                        ColorConsole.WriteProgress($"Base Data at {Colors.TechOrange}0x{currentOffset:X}{Colors.Reset}, size: {Colors.GoldYellow}{baseDataSize:N0} bytes{Colors.Reset}");
+                        CHRDecryptor.DecryptSection(reader, writer, currentOffset, baseDataSize, filenameBytes, primaryKey);
+                        currentOffset += baseDataSize;
+                        
+                        // 5. Character data (260 * count)
+                        uint charDataSize = sections.CharacterDataCount * 260;
+                        ColorConsole.WriteProgress($"Character Data at {Colors.TechOrange}0x{currentOffset:X}{Colors.Reset}, size: {Colors.GoldYellow}{charDataSize:N0} bytes{Colors.Reset}");
+                        CHRDecryptor.DecryptSection(reader, writer, currentOffset, charDataSize, filenameBytes, primaryKey);
+                        currentOffset += charDataSize;
+                        
+                        // 6. Sprite data (64 * count)
+                        uint spriteSize = sections.SpriteDataCount * 64;
+                        ColorConsole.WriteProgress($"Sprite Data at {Colors.TechOrange}0x{currentOffset:X}{Colors.Reset}, size: {Colors.GoldYellow}{spriteSize:N0} bytes{Colors.Reset}");
+                        CHRDecryptor.DecryptSection(reader, writer, currentOffset, spriteSize, filenameBytes, primaryKey);
+                        currentOffset += spriteSize;
+                        
+                        // 7. Collision data2 (24 * count)
+                        uint collision2Size = sections.CollisionData2Count * 24;
+                        ColorConsole.WriteProgress($"Collision Data2 at {Colors.TechOrange}0x{currentOffset:X}{Colors.Reset}, size: {Colors.GoldYellow}{collision2Size:N0} bytes{Colors.Reset}");
+                        CHRDecryptor.DecryptSection(reader, writer, currentOffset, collision2Size, filenameBytes, primaryKey);
+                        
+                        Console.WriteLine();
+                        ColorConsole.WriteSuccess($"Successfully decrypted CHR file to {Colors.CyberGreen}{args[0]}_decrypted.bin{Colors.Reset}");
+                    }
+                    else
+                    {
+                        Console.WriteLine();
+                        ColorConsole.WriteWarning("⚠️ SKIPPING SECTION DECRYPTION - Section table contains garbage values");
+                        ColorConsole.WriteInfo("This prevents crashes from attempting to read massive amounts of data");
+                        ColorConsole.WriteInfo("Focus: Need to fix section table decryption algorithm for these files");
+                        
+                        // Still create a minimal output file with just the header
+                        Console.WriteLine();
+                        ColorConsole.WriteInfo($"Creating header-only file: {Colors.GoldYellow}{args[0]}_header_only.bin{Colors.Reset}");
+                    }
                 }
             }
             catch (Exception ex)
