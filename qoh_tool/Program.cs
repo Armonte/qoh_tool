@@ -314,6 +314,136 @@ namespace qoh_tool
 
     internal class Program
     {
+        static void DecryptFolder(string inputFolder, string outputFolder)
+        {
+            ColorConsole.WriteSection("BATCH CHR DECRYPTION MODE");
+            ColorConsole.WriteInfo($"Input folder: {Colors.CrystalWhite}{inputFolder}{Colors.Reset}");
+            ColorConsole.WriteInfo($"Output folder: {Colors.CrystalWhite}{outputFolder}{Colors.Reset}");
+            Console.WriteLine();
+
+            Directory.CreateDirectory(outputFolder);
+
+            var chrFiles = Directory.GetFiles(inputFolder, "*.chr", SearchOption.AllDirectories);
+            ColorConsole.WriteInfo($"Found {Colors.GoldYellow}{chrFiles.Length}{Colors.Reset} CHR files to decrypt");
+            Console.WriteLine();
+
+            var successCount = 0;
+            var failureCount = 0;
+            byte[] primaryKey = CHRDecryptor.GetPrimaryKey();
+
+            foreach (var chrFile in chrFiles)
+            {
+                try
+                {
+                    string outputFile = Path.Combine(outputFolder, Path.GetFileNameWithoutExtension(chrFile) + ".bin");
+
+                    using (BinaryReader reader = new BinaryReader(File.OpenRead(chrFile)))
+                    using (BinaryWriter writer = new BinaryWriter(File.Create(outputFile)))
+                    {
+                        // Decrypt header
+                        reader.BaseStream.Position = 0;
+                        int keyIndex = 0;
+                        byte[] headerBytes = new byte[16];
+
+                        for (int i = 0; i < 0x10; i++)
+                        {
+                            byte encryptedByte = reader.ReadByte();
+                            byte decryptedByte = (byte)(encryptedByte ^ primaryKey[keyIndex]);
+                            writer.Write(decryptedByte);
+                            headerBytes[i] = decryptedByte;
+
+                            keyIndex++;
+                            if (keyIndex < primaryKey.Length && primaryKey[keyIndex] == 0)
+                                keyIndex = 0;
+                            else if (keyIndex >= primaryKey.Length)
+                                keyIndex = 0;
+                        }
+
+                        string pathBasedFilename = Path.GetFileName(chrFile).Replace(".chr", "").Replace(".CHR", "").ToUpper();
+                        byte[] filenameBytes = Encoding.UTF8.GetBytes(pathBasedFilename);
+
+                        // Decrypt file size
+                        uint decryptedSizeField = CHRDecryptor.DecryptFileSize(reader, filenameBytes, primaryKey);
+                        writer.Write((byte)(decryptedSizeField & 0xFF));
+                        writer.Write((byte)((decryptedSizeField >> 8) & 0xFF));
+                        writer.Write((byte)((decryptedSizeField >> 16) & 0xFF));
+                        writer.Write((byte)((decryptedSizeField >> 24) & 0xFF));
+
+                        // Decrypt section table
+                        CHRDecryptor.CHRSectionInfo sections = CHRDecryptor.DecryptSectionTable(reader, filenameBytes, primaryKey, false);
+                        writer.Write((byte)(sections.AnimationCount & 0xFF));
+                        writer.Write((byte)((sections.AnimationCount >> 8) & 0xFF));
+                        writer.Write((byte)((sections.AnimationCount >> 16) & 0xFF));
+                        writer.Write((byte)((sections.AnimationCount >> 24) & 0xFF));
+                        writer.Write((byte)(sections.CharacterDataCount & 0xFF));
+                        writer.Write((byte)((sections.CharacterDataCount >> 8) & 0xFF));
+                        writer.Write((byte)((sections.CharacterDataCount >> 16) & 0xFF));
+                        writer.Write((byte)((sections.CharacterDataCount >> 24) & 0xFF));
+                        writer.Write((byte)(sections.CollisionBoxCount & 0xFF));
+                        writer.Write((byte)((sections.CollisionBoxCount >> 8) & 0xFF));
+                        writer.Write((byte)((sections.CollisionBoxCount >> 16) & 0xFF));
+                        writer.Write((byte)((sections.CollisionBoxCount >> 24) & 0xFF));
+                        writer.Write((byte)(sections.SpriteDataCount & 0xFF));
+                        writer.Write((byte)((sections.SpriteDataCount >> 8) & 0xFF));
+                        writer.Write((byte)((sections.SpriteDataCount >> 16) & 0xFF));
+                        writer.Write((byte)((sections.SpriteDataCount >> 24) & 0xFF));
+                        writer.Write((byte)(sections.AnimationFrameCount & 0xFF));
+                        writer.Write((byte)((sections.AnimationFrameCount >> 8) & 0xFF));
+                        writer.Write((byte)((sections.AnimationFrameCount >> 16) & 0xFF));
+                        writer.Write((byte)((sections.AnimationFrameCount >> 24) & 0xFF));
+                        writer.Write((byte)(sections.CollisionData2Count & 0xFF));
+                        writer.Write((byte)((sections.CollisionData2Count >> 8) & 0xFF));
+                        writer.Write((byte)((sections.CollisionData2Count >> 16) & 0xFF));
+                        writer.Write((byte)((sections.CollisionData2Count >> 24) & 0xFF));
+
+                        // Decrypt all sections
+                        long currentOffset = 0x2C;
+
+                        uint animFrameSize = sections.AnimationFrameCount * 8;
+                        CHRDecryptor.DecryptSection(reader, writer, currentOffset, animFrameSize, filenameBytes, primaryKey);
+                        currentOffset += animFrameSize;
+
+                        uint collisionSize = sections.CollisionBoxCount * 24;
+                        CHRDecryptor.DecryptSection(reader, writer, currentOffset, collisionSize, filenameBytes, primaryKey);
+                        currentOffset += collisionSize;
+
+                        uint animationSize = sections.AnimationCount * 12;
+                        CHRDecryptor.DecryptSection(reader, writer, currentOffset, animationSize, filenameBytes, primaryKey);
+                        currentOffset += animationSize;
+
+                        uint baseDataSize = 1024;
+                        CHRDecryptor.DecryptSection(reader, writer, currentOffset, baseDataSize, filenameBytes, primaryKey);
+                        currentOffset += baseDataSize;
+
+                        uint charDataSize = sections.CharacterDataCount * 260;
+                        CHRDecryptor.DecryptSection(reader, writer, currentOffset, charDataSize, filenameBytes, primaryKey);
+                        currentOffset += charDataSize;
+
+                        uint spriteSize = sections.SpriteDataCount * 64;
+                        CHRDecryptor.DecryptSection(reader, writer, currentOffset, spriteSize, filenameBytes, primaryKey);
+                        currentOffset += spriteSize;
+
+                        uint collision2Size = sections.CollisionData2Count * 24;
+                        CHRDecryptor.DecryptSection(reader, writer, currentOffset, collision2Size, filenameBytes, primaryKey);
+
+                        successCount++;
+                        ColorConsole.WriteSuccess($"{Path.GetFileName(chrFile)} -> {Path.GetFileName(outputFile)}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    failureCount++;
+                    ColorConsole.WriteError($"{Path.GetFileName(chrFile)} - {ex.Message}");
+                }
+            }
+
+            Console.WriteLine();
+            ColorConsole.WriteSection("DECRYPTION SUMMARY");
+            ColorConsole.WriteSuccess($"Successful: {Colors.CyberGreen}{successCount}{Colors.Reset}/{chrFiles.Length}");
+            if (failureCount > 0)
+                ColorConsole.WriteError($"Failed: {Colors.LaserRed}{failureCount}{Colors.Reset}/{chrFiles.Length}");
+        }
+
         static void AnalyzeFolder(string inputFolder, string outputFolder)
         {
             ColorConsole.WriteSection("BATCH CHR ANALYSIS MODE");
@@ -349,9 +479,13 @@ namespace qoh_tool
                             keyIndex++;
                         }
                         
-                        string filename = Encoding.UTF8.GetString(headerBytes).TrimEnd('\0');
-                        byte[] filenameBytes = Encoding.UTF8.GetBytes(filename);
-                        
+                        string decryptedFilename = Encoding.UTF8.GetString(headerBytes).TrimEnd('\0');
+                        // CRITICAL FIX: Use filename from FILE PATH, not the full 16-byte decrypted header
+                        // IDA lines 73-88 show: Generate expected filename from path, compare, then NULL-terminate
+                        // at the match point. Use that trimmed filename (not full header) as XOR key.
+                        string pathBasedFilename = Path.GetFileName(chrFile).Replace(".chr", "").Replace(".CHR", "").ToUpper();
+                        byte[] filenameBytes = Encoding.UTF8.GetBytes(pathBasedFilename);
+
                         // Test section table decryption
                         CHRDecryptor.CHRSectionInfo sections = CHRDecryptor.DecryptSectionTable(reader, filenameBytes, primaryKey, false);
                         
@@ -361,12 +495,12 @@ namespace qoh_tool
                         if (isWorking)
                         {
                             workingFiles.Add(chrFile);
-                            ColorConsole.WriteSuccess($"{Path.GetFileName(chrFile)} - {Colors.NeonPurple}{filename}{Colors.Reset} - Frames: {Colors.MatrixGreen}{sections.AnimationFrameCount}{Colors.Reset}");
+                            ColorConsole.WriteSuccess($"{Path.GetFileName(chrFile)} - {Colors.NeonPurple}{decryptedFilename}{Colors.Reset} - Frames: {Colors.MatrixGreen}{sections.AnimationFrameCount}{Colors.Reset}");
                         }
                         else
                         {
                             failingFiles.Add(chrFile);
-                            ColorConsole.WriteError($"{Path.GetFileName(chrFile)} - {Colors.NeonPurple}{filename}{Colors.Reset} - Frames: {Colors.LaserRed}{sections.AnimationFrameCount:N0}{Colors.Reset} (FAILED)");
+                            ColorConsole.WriteError($"{Path.GetFileName(chrFile)} - {Colors.NeonPurple}{decryptedFilename}{Colors.Reset} - Frames: {Colors.LaserRed}{sections.AnimationFrameCount:N0}{Colors.Reset} (FAILED)");
                         }
                     }
                 }
@@ -422,12 +556,20 @@ namespace qoh_tool
             {
                 ColorConsole.WriteError("No input specified!");
                 Console.WriteLine($"{Colors.BrightYellow}Usage:{Colors.Reset}");
-                Console.WriteLine($"  {Colors.BrightWhite}Single file: {Colors.GoldYellow}qoh_tool.exe <chr_file>{Colors.Reset}");
-                Console.WriteLine($"  {Colors.BrightWhite}Batch mode:  {Colors.GoldYellow}qoh_tool.exe <input_folder> <output_folder>{Colors.Reset}");
+                Console.WriteLine($"  {Colors.BrightWhite}Single file:     {Colors.GoldYellow}qoh_tool.exe <chr_file>{Colors.Reset}");
+                Console.WriteLine($"  {Colors.BrightWhite}Batch analysis:  {Colors.GoldYellow}qoh_tool.exe <input_folder> <report_folder>{Colors.Reset}");
+                Console.WriteLine($"  {Colors.BrightWhite}Batch decrypt:   {Colors.GoldYellow}qoh_tool.exe <input_folder> -o <output_folder>{Colors.Reset}");
                 return;
             }
-            
-            // Check if batch mode (2 arguments = input folder + output folder)
+
+            // Check if batch decrypt mode (3 arguments with -o flag)
+            if (args.Length == 3 && args[1] == "-o")
+            {
+                DecryptFolder(args[0], args[2]);
+                return;
+            }
+
+            // Check if batch analysis mode (2 arguments = input folder + report folder)
             if (args.Length == 2)
             {
                 AnalyzeFolder(args[0], args[1]);
@@ -480,13 +622,18 @@ namespace qoh_tool
                     }
                     
                     // Extract the correct filename
-                    string filename = Encoding.UTF8.GetString(headerBytes, 0, actualFilenameLength);
-                    ColorConsole.WriteSuccess($"Decrypted filename: {Colors.NeonPurple}{filename}{Colors.Reset}");
+                    string decryptedFilename = Encoding.UTF8.GetString(headerBytes, 0, actualFilenameLength);
+                    ColorConsole.WriteSuccess($"Decrypted filename: {Colors.NeonPurple}{decryptedFilename}{Colors.Reset}");
                     ColorConsole.WriteInfo($"Expected filename: {Colors.NeonPurple}{expectedFilename}{Colors.Reset}");
-                    ColorConsole.WriteInfo($"Actual filename length: {Colors.GoldYellow}{actualFilenameLength}{Colors.Reset}");
-                    
-                    byte[] filenameBytes = Encoding.UTF8.GetBytes(filename);
-                    
+                    ColorConsole.WriteInfo($"Decrypted filename length: {Colors.GoldYellow}{actualFilenameLength}{Colors.Reset}");
+
+                    // CRITICAL FIX: Use filename from FILE PATH, not the full 16-byte decrypted header
+                    // IDA lines 73-88: Generate expected from path, validate, NULL-terminate at match point
+                    // The game uses the PATH-BASED filename (e.g., "AKARI"), not full header ("AKARIAKARIAKARIA")
+                    string pathBasedFilename = Path.GetFileNameWithoutExtension(args[0]).ToUpper();
+                    byte[] filenameBytes = Encoding.UTF8.GetBytes(pathBasedFilename);
+                    ColorConsole.WriteInfo($"Using XOR key from path: {Colors.GoldYellow}{pathBasedFilename}{Colors.Reset} ({pathBasedFilename.Length} bytes)");
+
                     // Step 2: Go back to the working approach
                     long actualFileSize = reader.BaseStream.Length;
                     uint decryptedSizeField = CHRDecryptor.DecryptFileSize(reader, filenameBytes, primaryKey);
@@ -519,7 +666,7 @@ namespace qoh_tool
                         Console.WriteLine();
                         
                         ColorConsole.WriteInfo("✅ WHAT'S WORKING:");
-                        Console.WriteLine($"{Colors.CyberGreen}    - Filename decryption: PERFECT ({filename}){Colors.Reset}");
+                        Console.WriteLine($"{Colors.CyberGreen}    - Filename decryption: PERFECT ({decryptedFilename}){Colors.Reset}");
                         Console.WriteLine($"{Colors.CyberGreen}    - File size field: {decryptedSizeField} (consistent with working files){Colors.Reset}");
                         Console.WriteLine($"{Colors.CyberGreen}    - First 4 section values look reasonable{Colors.Reset}");
                         
